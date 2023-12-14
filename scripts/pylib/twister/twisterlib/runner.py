@@ -602,7 +602,18 @@ class ProjectBuilder(FilterBuilder):
 
         # The build process, call cmake and build with configured generator
         if op == "cmake":
+            sca_arg = None
+            if self.options.dyn_filter and self.options.extra_args:
+                for arg in self.options.extra_args:
+                    if "ZEPHYR_SCA_VARIANT" in arg:
+                        self.options.extra_args.remove(arg)
+                        sca_arg = arg
+
             res = self.cmake()
+
+            if sca_arg:
+                self.options.extra_args.append(sca_arg)
+
             if self.instance.status in ["failed", "error"]:
                 pipeline.put({"op": "report", "test": self.instance})
             elif self.options.cmake_only:
@@ -658,6 +669,12 @@ class ProjectBuilder(FilterBuilder):
 
         # Run the generated binary using one of the supported handlers
         elif op == "run":
+            sca_arg = None
+            if self.options.dyn_filter and self.options.extra_args:
+                for arg in self.options.extra_args:
+                    if "ZEPHYR_SCA_VARIANT" in arg:
+                        sca_arg = arg
+
             if self.options.dyn_filter and not self.dependencies_have_changed():
                 self.instance.status = "skipped"
                 self.instance.reason = "Dependencies not changed"
@@ -669,23 +686,29 @@ class ProjectBuilder(FilterBuilder):
                     }
                 )
             else:
-                logger.debug("run test: %s" % self.instance.name)
-                self.run()
-                logger.debug(f"run status: {self.instance.name} {self.instance.status}")
-                try:
-                    # to make it work with pickle
-                    self.instance.handler.thread = None
-                    self.instance.handler.duts = None
-                    pipeline.put({
-                        "op": "report",
-                        "test": self.instance,
-                        "status": self.instance.status,
-                        "reason": self.instance.reason
-                        }
-                    )
-                except RuntimeError as e:
-                    logger.error(f"RuntimeError: {e}")
-                    traceback.print_exc()
+                if sca_arg:
+                    self.options.dyn_filter.remove("changed_src")
+                    dyn_filter_build_dir = self.build_dir + '_dyn_filter_build'
+                    os.rename(self.build_dir, dyn_filter_build_dir)
+                    pipeline.put({"op": "cmake", "test": self.instance})
+                else:
+                    logger.debug("run test: %s" % self.instance.name)
+                    self.run()
+                    logger.debug(f"run status: {self.instance.name} {self.instance.status}")
+                    try:
+                        # to make it work with pickle
+                        self.instance.handler.thread = None
+                        self.instance.handler.duts = None
+                        pipeline.put({
+                            "op": "report",
+                            "test": self.instance,
+                            "status": self.instance.status,
+                            "reason": self.instance.reason
+                            }
+                        )
+                    except RuntimeError as e:
+                        logger.error(f"RuntimeError: {e}")
+                        traceback.print_exc()
 
         # Report results and output progress to screen
         elif op == "report":
