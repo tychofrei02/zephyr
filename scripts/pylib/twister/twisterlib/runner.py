@@ -653,6 +653,77 @@ class ProjectBuilder(FilterBuilder):
                     logger.debug(f"Determine test cases for test instance: {self.instance.name}")
                     try:
                         self.determine_testcases(results)
+                        if self.options.dyn_filter:
+                            pipeline.put({"op": "dynamic_filter", "test": self.instance})
+                        else:
+                            pipeline.put({"op": "gather_metrics", "test": self.instance})
+                    except BuildError as e:
+                        logger.error(str(e))
+                        self.instance.status = "error"
+                        self.instance.reason = str(e)
+                        pipeline.put({"op": "report", "test": self.instance})
+
+        elif op == "dynamic_filter":
+            if self.dependencies_have_changed():
+                if "ZEPHYR_SCA_VARIANT" in "\t".join(self.options.extra_args):
+                    dyn_filter_build_dir = self.build_dir + '_dyn_filter_build'
+                    os.rename(self.build_dir, dyn_filter_build_dir)
+                    pipeline.put({"op": "sca_second_cmake", "test": self.instance})
+                else:
+                    pipeline.put({"op": "gather_metrics", "test": self.instance})
+            else:
+                self.instance.status = "skipped"
+                self.instance.reason = "Dependencies not changed"
+                pipeline.put({
+                    "op": "report",
+                    "test": self.instance,
+                    "status": self.instance.status,
+                    "reason": self.instance.reason
+                    }
+                )
+
+        elif op =="sca_second_cmake":
+            res = self.cmake()
+
+            if self.instance.status in ["failed", "error"]:
+                pipeline.put({"op": "report", "test": self.instance})
+            elif self.options.cmake_only:
+                if self.instance.status is None:
+                    self.instance.status = "passed"
+                pipeline.put({"op": "report", "test": self.instance})
+            else:
+                # Here we check the runtime filter results coming from running cmake
+                if self.instance.name in res['filter'] and res['filter'][self.instance.name]:
+                    logger.debug("filtering %s" % self.instance.name)
+                    self.instance.status = "filtered"
+                    self.instance.reason = "runtime filter"
+                    results.skipped_runtime += 1
+                    self.instance.add_missing_case_status("skipped")
+                    pipeline.put({"op": "report", "test": self.instance})
+                else:
+                    pipeline.put({"op": "sca_second_build", "test": self.instance})
+
+        elif op == "sca_second_build":
+            logger.debug("build test: %s" % self.instance.name)
+            res = self.build()
+            if not res:
+                self.instance.status = "error"
+                self.instance.reason = "Build Failure"
+                pipeline.put({"op": "report", "test": self.instance})
+            else:
+                # Count skipped cases during build, for example
+                # due to ram/rom overflow.
+                if  self.instance.status == "skipped":
+                    results.skipped_runtime += 1
+                    self.instance.add_missing_case_status("skipped", self.instance.reason)
+
+                if res.get('returncode', 1) > 0:
+                    self.instance.add_missing_case_status("blocked", self.instance.reason)
+                    pipeline.put({"op": "report", "test": self.instance})
+                else:
+                    logger.debug(f"Determine test cases for test instance: {self.instance.name}")
+                    try:
+                        self.determine_testcases(results)
                         pipeline.put({"op": "gather_metrics", "test": self.instance})
                     except BuildError as e:
                         logger.error(str(e))
@@ -669,15 +740,13 @@ class ProjectBuilder(FilterBuilder):
 
         # Run the generated binary using one of the supported handlers
         elif op == "run":
-            sca_arg = None
-            if self.options.dyn_filter and self.options.extra_args:
-                for arg in self.options.extra_args:
-                    if "ZEPHYR_SCA_VARIANT" in arg:
-                        sca_arg = arg
-
-            if self.options.dyn_filter and not self.dependencies_have_changed():
-                self.instance.status = "skipped"
-                self.instance.reason = "Dependencies not changed"
+            logger.debug("run test: %s" % self.instance.name)
+            self.run()
+            logger.debug(f"run status: {self.instance.name} {self.instance.status}")
+            try:
+                # to make it work with pickle
+                self.instance.handler.thread = None
+                self.instance.handler.duts = None
                 pipeline.put({
                     "op": "report",
                     "test": self.instance,
@@ -685,30 +754,9 @@ class ProjectBuilder(FilterBuilder):
                     "reason": self.instance.reason
                     }
                 )
-            else:
-                if sca_arg:
-                    self.options.dyn_filter.remove("changed_src")
-                    dyn_filter_build_dir = self.build_dir + '_dyn_filter_build'
-                    os.rename(self.build_dir, dyn_filter_build_dir)
-                    pipeline.put({"op": "cmake", "test": self.instance})
-                else:
-                    logger.debug("run test: %s" % self.instance.name)
-                    self.run()
-                    logger.debug(f"run status: {self.instance.name} {self.instance.status}")
-                    try:
-                        # to make it work with pickle
-                        self.instance.handler.thread = None
-                        self.instance.handler.duts = None
-                        pipeline.put({
-                            "op": "report",
-                            "test": self.instance,
-                            "status": self.instance.status,
-                            "reason": self.instance.reason
-                            }
-                        )
-                    except RuntimeError as e:
-                        logger.error(f"RuntimeError: {e}")
-                        traceback.print_exc()
+            except RuntimeError as e:
+                logger.error(f"RuntimeError: {e}")
+                traceback.print_exc()
 
         # Report results and output progress to screen
         elif op == "report":
@@ -1118,6 +1166,27 @@ class ProjectBuilder(FilterBuilder):
                 instance.handler.handle(harness)
 
         sys.stdout.flush()
+
+    def op_cmake(self, pipeline, results):
+        res = self.cmake()
+
+        if self.instance.status in ["failed", "error"]:
+            pipeline.put({"op": "report", "test": self.instance})
+        elif self.options.cmake_only:
+            if self.instance.status is None:
+                self.instance.status = "passed"
+            pipeline.put({"op": "report", "test": self.instance})
+        else:
+            # Here we check the runtime filter results coming from running cmake
+            if self.instance.name in res['filter'] and res['filter'][self.instance.name]:
+                logger.debug("filtering %s" % self.instance.name)
+                self.instance.status = "filtered"
+                self.instance.reason = "runtime filter"
+                results.skipped_runtime += 1
+                self.instance.add_missing_case_status("skipped")
+                pipeline.put({"op": "report", "test": self.instance})
+            else:
+                pipeline.put({"op": "build", "test": self.instance})
 
     def dependencies_have_changed(self):
         if "changed_src" in self.options.dyn_filter:
