@@ -1167,27 +1167,6 @@ class ProjectBuilder(FilterBuilder):
 
         sys.stdout.flush()
 
-    def op_cmake(self, pipeline, results):
-        res = self.cmake()
-
-        if self.instance.status in ["failed", "error"]:
-            pipeline.put({"op": "report", "test": self.instance})
-        elif self.options.cmake_only:
-            if self.instance.status is None:
-                self.instance.status = "passed"
-            pipeline.put({"op": "report", "test": self.instance})
-        else:
-            # Here we check the runtime filter results coming from running cmake
-            if self.instance.name in res['filter'] and res['filter'][self.instance.name]:
-                logger.debug("filtering %s" % self.instance.name)
-                self.instance.status = "filtered"
-                self.instance.reason = "runtime filter"
-                results.skipped_runtime += 1
-                self.instance.add_missing_case_status("skipped")
-                pipeline.put({"op": "report", "test": self.instance})
-            else:
-                pipeline.put({"op": "build", "test": self.instance})
-
     def dependencies_have_changed(self):
         if "changed_src" in self.options.dyn_filter:
             has_changed_dependencies = False
